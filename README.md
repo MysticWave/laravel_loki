@@ -1,31 +1,88 @@
-# Install Loki stack for laravel application
+# Grafana Loki
 
-1. Copy `promtail-config.yaml` to `.docker/web/promtail-config.yaml`
+### Adding to project
 
-2. Add this to your `Dockerfile`:
+Basic application deployment:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  (...)
+spec:
+  (...)
+    spec:
+      (...)
+      containers:
+        
+        (...)
+        ### add this volume to make Promtail work
+        ### adjust the mountPath for logs directory here, and in the Promtail container
+          volumeMounts:
+            - mountPath: /var/www/storage/logs
+              name: shared-volume
 
-```Dockerfile
-# Install Promtail -----------------------------------------------------------
-RUN curl -O -L "https://github.com/grafana/loki/releases/download/v2.4.1/promtail-linux-amd64.zip"
-RUN unzip "promtail-linux-amd64.zip" -d /usr/local/bin && mv /usr/local/bin/promtail-linux-amd64 /usr/local/bin/promtail && rm "promtail-linux-amd64.zip"
-RUN chmod a+x /usr/local/bin/promtail
-ADD ./.docker/web/promtail-config.yaml /etc/promtail/promtail-config.yaml
-# ----------------------------------------------------------------------------
+        - name: <project>-promtail
+          image: "grafana/promtail:latest"
+          imagePullPolicy: Always
+          volumeMounts:
+            - mountPath: /var/www/storage/logs
+              name: shared-volume
+            - mountPath: /etc/promtail
+              name: config-volume
+
+      volumes:
+        - name: shared-volume
+          emptyDir: {}
+        - name: config-volume
+          configMap:
+            name: promtail-config
+            items:
+              - key: promtail-config.yaml
+                path: config.yml
+
 ```
 
-3. Copy `LokiLogFormatter.php` to `app/Support/LokiLogFormatter.php` (or wherever you want, just don't forget to change the file location in the next step)
+promtail.configmap.yml:
+```yaml
+# adjust project-name and namespace
+# change scrape_configs.static_configs.labels.__path__ if needed
+# if your logs are formatted in a different way than default Laravel logs, adjust the scrape_configs.pipeline_stages.multine.firstline
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: <project-namespace>
+data:
+  promtail-config.yaml: |
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
 
-4. Open `config/logging.php` and change your logging stack options:
+    positions:
+      filename: /tmp/positions.yaml
 
-```php
-'channels' => [
-    // ...
-        'stack' => [
-            'driver' => 'stack',
-            'channels' => ['daily'],
-            'ignore_exceptions' => false,
-            'tap' => [App\Support\LokiLogFormatter::class]  // <-- You need only this single line
-        ],
-    // ...
-];
+    clients:
+      - url: http://loki.grafana-loki.svc.cluster.local:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: laravel
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: <project-name>
+              __path__: /var/www/storage/logs/*log
+        pipeline_stages:
+          - multiline:
+              firstline: '^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] .*'
+              max_wait_time: 1s
+
 ```
+
+### Connecting to Grafana UI
+
+run:
+```bash
+kubectl port-forward service/loki-grafana 3000:80
+```
+and visit: `localhost:3000`
